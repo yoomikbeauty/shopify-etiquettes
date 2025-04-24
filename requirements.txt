@@ -1,0 +1,6 @@
+streamlit
+reportlab
+pandas
+requests
+textwrap3
+pyinstaller

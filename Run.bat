@@ -1,0 +1,1 @@
+streamlit run shopify_app.py
