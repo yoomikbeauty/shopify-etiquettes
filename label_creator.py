@@ -89,9 +89,9 @@ with st.expander("🔧 Paramètres API et mise à jour Shopify"):
         st.session_state.only_recent = only_recent
 
 # Chargement initial depuis fichier CSV si existant
-if os.path.exists("produits_shopify.csv"):
+if os.path.exists("data/produits_shopify.csv"):
     try:
-        df_temp = pd.read_csv("produits_shopify.csv")
+        df_temp = pd.read_csv("data/produits_shopify.csv")
         if "updated_at" in df_temp.columns:
             last_update_display = pd.to_datetime(df_temp["updated_at"], errors="coerce").max()
             total_count = len(df_temp)
@@ -99,15 +99,15 @@ if os.path.exists("produits_shopify.csv"):
     except:
         pass
 if "df" not in st.session_state:
-    if os.path.exists("produits_shopify.csv"):
+    if os.path.exists("data/produits_shopify.csv"):
         st.session_state['df'] = pd.read_csv("data/produits_shopify.csv")
         st.success("Base produits chargée depuis le fichier local.")
 
 # Mise à jour manuelle
 last_updated = None
-if os.path.exists("produits_shopify.csv"):
+if os.path.exists("data/produits_shopify.csv"):
         try:
-            old_df = pd.read_csv("produits_shopify.csv")
+            old_df = pd.read_csv("data/produits_shopify.csv")
             if "updated_at" in old_df.columns:
                 last_updated = pd.to_datetime(old_df["updated_at"], errors="coerce").max()
         except:
@@ -223,16 +223,16 @@ if st.button("Mettre à jour la base produits depuis Shopify"):
 
         data = sorted(data, key=lambda x: x["ID"], reverse=True)
         df = pd.DataFrame(all_new_data)
-        if os.path.exists("produits_shopify.csv"):
+        if os.path.exists("data/produits_shopify.csv"):
             try:
-                old_df = pd.read_csv("produits_shopify.csv")
+                old_df = pd.read_csv("data/produits_shopify.csv")
                 combined_df = pd.concat([old_df, df], ignore_index=True)
                 df = combined_df.drop_duplicates(subset="ID", keep="last")
             except:
                 pass
-        df.to_csv("produits_shopify.csv", index=False)
+        df.to_csv("data/produits_shopify.csv", index=False)
         st.session_state['df'] = df
-        st.success(f"{len(df)} produits récupérés et enregistrés dans 'produits_shopify.csv'.")
+        st.success(f"{len(df)} produits récupérés et enregistrés dans 'data/produits_shopify.csv'.")
 
 # Affichage + export CSV + sélection PDF si données présentes
 if 'df' in st.session_state:
@@ -243,7 +243,7 @@ if 'df' in st.session_state:
     st.download_button(
         label="Télécharger en CSV",
         data=csv,
-        file_name="produits_shopify.csv",
+        file_name="data/produits_shopify.csv",
         mime="text/csv",
     )
 
@@ -356,7 +356,7 @@ if 'df' in st.session_state:
             icon_x = x + 2 * mm
             if str(row.get('custom.info_vegan', '')).lower() == 'true':
                 try:
-                    c.drawImage(resource_path("images/vegan.png"), icon_x, icon_y, width=icon_size, height=icon_size, preserveAspectRatio=True)
+                    c.drawImage("images/vegan.png", icon_x, icon_y, width=icon_size, height=icon_size, preserveAspectRatio=True)
                     icon_x += icon_size + 0
                 except Exception as e:
                     c.setFillColorRGB(1, 0, 0)
@@ -364,7 +364,7 @@ if 'df' in st.session_state:
                     icon_x += icon_size + 0
             if str(row.get('custom.info_cruelty_free', '')).lower() == 'true':
                 try:
-                    c.drawImage(resource_path("images/cruelty.png"), icon_x, icon_y, width=icon_size, height=icon_size, preserveAspectRatio=True)
+                    c.drawImage("images/cruelty.png", icon_x, icon_y, width=icon_size, height=icon_size, preserveAspectRatio=True)
                     icon_x += icon_size + 0
                 except Exception as e:
                     c.setFillColorRGB(1, 0, 0)
@@ -372,7 +372,7 @@ if 'df' in st.session_state:
                     icon_x += icon_size + 0
             if str(row.get('custom.info_clean_beauty', '')).lower() == 'true':
                 try:
-                    c.drawImage(resource_path("images/clean.png"), icon_x, icon_y, width=icon_size, height=icon_size, preserveAspectRatio=True)
+                    c.drawImage("images/clean.png", icon_x, icon_y, width=icon_size, height=icon_size, preserveAspectRatio=True)
                     icon_x += icon_size + 0
                 except Exception as e:
                     c.setFillColorRGB(1, 0, 0)

@@ -1,1 +1,1 @@
-streamlit run shopify_app.py
+streamlit run label_creator.py
