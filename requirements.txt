@@ -2,5 +2,6 @@ streamlit
 reportlab
 pandas
 requests
-textwrap3
-pyinstaller
+python-docx
+PyMuPDF
+pillow
