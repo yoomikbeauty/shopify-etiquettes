@@ -70,7 +70,7 @@ class PDFTextHTMLParser(HTMLParser):
 
     def handle_data(self, data):
         if self.bold:
-            self.c.setFont(self.font + "-Bold", self.font_size)
+            self.c.setFont(self.font + "T", self.font_size)
         else:
             self.c.setFont(self.font, self.font_size)
 
@@ -99,6 +99,32 @@ def draw_box_rich(c, x, y, width, height, html_text, font="BellCentennial", font
         parser.feed(html_text)  # rend le texte avec balises <b>
         start_y -= line_height
 
+def wrap_and_draw(text, start_y, x=6, font_size=4.5, font="BellCentennial", max_width=130):
+    """
+    Affiche du texte ligne par ligne à partir de x, y. Retourne y final.
+    """
+    line_height = font_size + 1.5
+    c.setFont(font, font_size)
+
+    words = text.split()
+    lines = []
+    current_line = ""
+
+    for word in words:
+        test_line = f"{current_line} {word}".strip()
+        if c.stringWidth(test_line, font, font_size) > max_width:
+            lines.append(current_line.strip())
+            current_line = word
+        else:
+            current_line = test_line
+    if current_line:
+        lines.append(current_line.strip())
+
+    for line in lines:
+        c.drawString(x, start_y, line)
+        start_y -= line_height
+
+    return start_y
 
 PRECAUTION_DEFAULT = (
     "<b>Avertissement!</b> Usage externe uniquement. Éviter tout contact avec les yeux. "
@@ -183,7 +209,7 @@ st.image("images/logo.png", width=250)
 st.markdown("<h1 style='text-align:center'>Créateur de carte YOOMI</h1>", unsafe_allow_html=True)
 
 
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["Base de données", "Étiquettes prix", "Étiquettes de traduction Fournisseur", "Étiquettes de traduction Boutique", "📦 Stock fournisseur", "📦 Gestion stock manuels" ])
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["Base de données", "Étiquettes prix", "Étiquettes de traduction Fournisseur", "Étiquettes de traduction Boutique (beta)", "📦 Stock fournisseur", "📦 Gestion stock manuels", "💸 Gestion Soldes" ])
 
 
 
@@ -953,10 +979,11 @@ with tab4:
             buffer = BytesIO()
             c = canvas.Canvas(buffer, pagesize=PAGE_SIZE)
 
-            for _, row in filtered.iterrows():
+            for _, row in to_print.iterrows():
                 # Zone texte : 5x5 cm
                 x, y = 5, 5
                 width, height = 131.7, 131.7  # avec marges
+                line_height = 10
 
                 bloc_text = (
                     f"<b>{row['Vendor']}</b>\n"
@@ -1029,5 +1056,200 @@ with tab4:
                 except Exception as e:
                     st.warning(f"Impossible d'afficher un aperçu : {e}")
 
+with tab7:
+    st.markdown("## 💸 Gestion des Soldes (manuelle par sélection)")
 
-   
+    if "df" in st.session_state:
+        df = st.session_state["df"].copy()
+        df['label_soldes'] = df['Vendor'] + ' - ' + df['Title']
+        selected_soldes = st.multiselect("🛍️ Sélectionne les produits à solder", options=df['label_soldes'].tolist(), key="soldes_selection")
+
+        # Saisie du tag à appliquer (ex : soldes30, soldes50)
+        tag_to_apply = st.text_input("🏷️ Tag à appliquer (ex : soldes30)", value="soldes30")
+
+        # Bouton pour ajouter le tag
+        if st.button("✅ Ajouter le tag aux produits sélectionnés"):
+            headers = {"X-Shopify-Access-Token": access_token}
+            products = []
+            base_url = f"https://{shop_url}/admin/api/2024-01/products.json?limit=250"
+            url = base_url
+
+            # Récupération des produits pour mapping titre → ID
+            while url:
+                resp = requests.get(url, headers=headers)
+                resp.raise_for_status()
+                products += resp.json().get("products", [])
+                link = resp.headers.get("Link", "")
+                if 'rel="next"' in link:
+                    match = re.search(r'<([^>]+)>; rel="next"', link)
+                    url = match.group(1) if match else None
+                else:
+                    break
+
+            titre_to_id = {p['title']: p for p in products}
+
+            for label in selected_soldes:
+                vendor, title = label.split(" - ", 1)
+                produit = titre_to_id.get(title)
+                if not produit:
+                    st.warning(f"❌ Produit introuvable : {title}")
+                    continue
+
+                tags_existants = produit.get("tags", "")
+                nouveaux_tags = [t.strip() for t in tags_existants.split(",") if t.strip()]
+                if tag_to_apply.lower() not in [t.lower() for t in nouveaux_tags]:
+                    nouveaux_tags.append(tag_to_apply)
+
+                    update_url = f"https://{shop_url}/admin/api/2024-01/products/{produit['id']}.json"
+                    payload = {"product": {"id": produit["id"], "tags": ", ".join(nouveaux_tags)}}
+                    update_resp = requests.put(update_url, headers=headers, json=payload)
+
+                    if update_resp.ok:
+                        st.success(f"🏷️ Tag '{tag_to_apply}' ajouté à {title}")
+                    else:
+                        st.error(f"❌ Erreur API sur {title} : {update_resp.text}")
+                else:
+                    st.info(f"ℹ️ Tag déjà présent sur {title}")
+
+    st.markdown("## 💸 Gestion des soldes automatiques Shopify")
+
+    if "df" not in st.session_state:
+        st.warning("Charge d'abord les produits dans l’onglet 1.")
+    else:
+        shop_url = st.secrets["shopify"]["shop_url"]
+        access_token = st.secrets["shopify"]["access_token"]
+        api_version = "2024-01"
+
+        headers = {
+            "X-Shopify-Access-Token": access_token,
+            "Content-Type": "application/json"
+        }
+
+        def round_up_to_0_05(value):
+            return round((value * 20 + 0.9999) // 1 / 20, 2)
+
+        def get_all_products():
+            all_products = []
+            url = f"https://{shop_url}/admin/api/{api_version}/products.json?limit=250"
+            while url:
+                resp = requests.get(url, headers=headers)
+                if resp.status_code != 200:
+                    st.error(f"Erreur API : {resp.status_code} - {resp.text}")
+                    break
+                products = resp.json().get("products", [])
+                all_products.extend(products)
+
+                link = resp.headers.get("Link", "")
+                next_url = None
+                if 'rel="next"' in link:
+                    parts = link.split(",")
+                    for part in parts:
+                        if 'rel="next"' in part:
+                            next_url = part.split(";")[0].strip().strip("<>").replace(" ", "")
+                url = next_url
+            return all_products
+
+        def extract_discount(tags):
+            for tag in tags.split(","):
+                tag = tag.strip().lower()
+                if tag.startswith("soldes"):
+                    try:
+                        return int(tag.replace("soldes", ""))
+                    except:
+                        return None
+            return None
+
+        def apply_discount(product, discount_percent):
+            for variant in product["variants"]:
+                current_price = float(variant["price"])
+                compare_at = variant.get("compare_at_price")
+                compare_price = float(compare_at) if compare_at else current_price
+
+                discounted = round_up_to_0_05(compare_price * (1 - discount_percent / 100))
+
+                needs_update = (
+                    compare_at is None or
+                    abs(compare_price - current_price) < 0.01 or
+                    abs(current_price - discounted) > 0.01
+                )
+
+                if not needs_update:
+                    continue
+
+                variant_payload = {
+                    "variant": {
+                        "id": variant["id"],
+                        "price": str(discounted),
+                        "compare_at_price": str(compare_price)
+                    }
+                }
+
+                resp = requests.put(
+                    f"https://{shop_url}/admin/api/{api_version}/variants/{variant['id']}.json",
+                    headers=headers,
+                    json=variant_payload
+                )
+
+                if resp.ok:
+                    st.success(f"✔️ {product['title']} → {compare_price}€ → {discounted}€")
+                else:
+                    st.error(f"❌ {product['title']} : {resp.text}")
+
+        def revert_discount(product, soldes_tag):
+            title = product["title"]
+            product_id = product["id"]
+            tags = product.get("tags", "")
+            new_tags = [tag for tag in tags.split(",") if tag.strip().lower() != soldes_tag]
+
+            updated = False
+            for variant in product["variants"]:
+                compare_at = variant.get("compare_at_price")
+                if compare_at:
+                    update = {
+                        "variant": {
+                            "id": variant["id"],
+                            "price": str(compare_at),
+                            "compare_at_price": None
+                        }
+                    }
+                    resp = requests.put(
+                        f"https://{shop_url}/admin/api/{api_version}/variants/{variant['id']}.json",
+                        headers=headers,
+                        json=update
+                    )
+                    if resp.ok:
+                        st.success(f"♻️ {title} : retour à {compare_at}€")
+                        updated = True
+                    else:
+                        st.error(f"❌ {title} : {resp.text}")
+
+            if updated:
+                tag_payload = {
+                    "product": {
+                        "id": product_id,
+                        "tags": ", ".join(new_tags)
+                    }
+                }
+                tag_resp = requests.put(
+                    f"https://{shop_url}/admin/api/{api_version}/products/{product_id}.json",
+                    headers=headers,
+                    json=tag_payload
+                )
+                if tag_resp.ok:
+                    st.info(f"🧹 Tag '{soldes_tag}' supprimé de {title}")
+                else:
+                    st.warning(f"⚠️ Tags non mis à jour pour {title}")
+
+        if st.button("✅ Appliquer les remises selon les tags (ex: soldes30)"):
+            produits = get_all_products()
+            for prod in produits:
+                remise = extract_discount(prod.get("tags", ""))
+                if remise:
+                    apply_discount(prod, remise)
+
+        if st.button("🔁 Annuler les soldes et restaurer les prix d’origine"):
+            produits = get_all_products()
+            for prod in produits:
+                tag_soldes = extract_discount(prod.get("tags", ""))
+                if tag_soldes:
+                    revert_discount(prod, f"soldes{tag_soldes}")
