@@ -78,53 +78,7 @@ class PDFTextHTMLParser(HTMLParser):
         text_width = self.c.stringWidth(data, self.font + ("T" if self.bold else ""), self.font_size)
         self.x_cursor += text_width
 
-def draw_box_rich(c, x, y, width, height, html_text, font="BellCentennial", font_size=7, padding=2):
-    import textwrap
 
-    c.setLineWidth(0.3)
-    c.setStrokeColorRGB(1, 0, 0)
-    c.rect(x, y, width, height)
-
-    plain_text = html_text.replace("<b>", "").replace("</b>", "")
-    line_height = font_size + 1.5
-    max_fit_lines = int(height // line_height)
-    wrapped = textwrap.wrap(plain_text, width=int((width - padding * 2) / (font_size * 0.5)))
-    wrapped = wrapped[:max_fit_lines]
-
-    total_text_height = len(wrapped) * line_height
-    start_y = y + (height - total_text_height) / 2 + total_text_height - line_height
-
-    for line in wrapped:
-        parser = PDFTextHTMLParser(c, x + padding, start_y, font, font_size)
-        parser.feed(html_text)  # rend le texte avec balises <b>
-        start_y -= line_height
-
-def wrap_and_draw(text, start_y, x=6, font_size=4.5, font="BellCentennial", max_width=130):
-    """
-    Affiche du texte ligne par ligne à partir de x, y. Retourne y final.
-    """
-    line_height = font_size + 1.5
-    c.setFont(font, font_size)
-
-    words = text.split()
-    lines = []
-    current_line = ""
-
-    for word in words:
-        test_line = f"{current_line} {word}".strip()
-        if c.stringWidth(test_line, font, font_size) > max_width:
-            lines.append(current_line.strip())
-            current_line = word
-        else:
-            current_line = test_line
-    if current_line:
-        lines.append(current_line.strip())
-
-    for line in lines:
-        c.drawString(x, start_y, line)
-        start_y -= line_height
-
-    return start_y
 
 PRECAUTION_DEFAULT = (
     "<b>Avertissement!</b> Usage externe uniquement. Éviter tout contact avec les yeux. "
@@ -200,7 +154,7 @@ pdfmetrics.registerFont(TTFont("IbarraRealNova-Bold", "fonts/IbarraRealNova-Bold
 pdfmetrics.registerFont(TTFont("IbarraRealNova-Regular", "fonts/IbarraRealNova-Regular.ttf"))
 pdfmetrics.registerFont(TTFont("IbarraRealNova-SemiBold", "fonts/IbarraRealNova-SemiBold.ttf"))
 pdfmetrics.registerFont(TTFont("BellCentennial", "fonts/BellCentennialStd-Address.ttf"))
-pdfmetrics.registerFont(TTFont("BellCentennialT", "fonts/BellCentennialStd-NameNum.ttf"))
+pdfmetrics.registerFont(TTFont("BellCentennialName", "fonts/BellCentennialStd-NameNum.ttf"))
 
 
 
@@ -952,109 +906,162 @@ with tab3:
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         )
 
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.units import mm
+from reportlab.pdfgen.canvas import Canvas
+
+import base64
+from reportlab.lib.pagesizes import portrait
+from reportlab.pdfgen.canvas import Canvas
+from PIL import Image
+import fitz  # PyMuPDF pour prévisualisation PDF
+
 with tab4:
-    st.markdown("## 📄 Générateur d’étiquettes de traduction autocollantes (5×5 cm)")
+    st.markdown("## 📄 Étiquettes de traduction (5×5 cm) avec polices personnalisées")
 
     if "df" not in st.session_state:
-        st.warning("⚠️ La base produits doit être chargée au préalable (voir onglet 1).")
+        st.warning("⚠️ Charge d'abord les produits depuis l’onglet 1.")
     else:
-        df = st.session_state["df"].copy()
+        df = st.session_state["df"]
+        df['label'] = df['Vendor'] + ' - ' + df['Title']
+        selected_labels = st.multiselect("📌 Sélectionne les produits", df['label'].tolist())
 
-        df['label_trad'] = df['Vendor'] + ' - ' + df['Title']
-        selected = st.multiselect("📌 Sélectionnez les produits à imprimer", options=df['label_trad'].tolist())
+        df_filtered = df[df['label'].isin(selected_labels)].reset_index(drop=True)
 
-        to_print = df[df['label_trad'].isin(selected)].reset_index(drop=True)
-
-        if not to_print.empty and st.button("🖨️ Générer PDF 5×5 cm (une étiquette par page)"):
-            from reportlab.lib.pagesizes import inch
-            from reportlab.pdfgen import canvas
-            from io import BytesIO
-            import textwrap
-            import os
-
-            import fitz  # PyMuPDF
+        if not df_filtered.empty:
+            from reportlab.lib.pagesizes import portrait
+            from reportlab.pdfbase import pdfmetrics
+            from reportlab.pdfbase.ttfonts import TTFont
+            from reportlab.platypus import SimpleDocTemplate, Paragraph, Frame
+            from reportlab.platypus import Spacer
+            from reportlab.lib.styles import ParagraphStyle
+            from reportlab.lib.enums import TA_CENTER
+            from reportlab.lib.units import mm
+            from reportlab.lib.colors import black
             from PIL import Image
+            import fitz
+            import os
+            from io import BytesIO
+            import pandas as pd
 
-            PAGE_SIZE = (141.7, 141.7)  # 5cm x 5cm en points
-            buffer = BytesIO()
-            c = canvas.Canvas(buffer, pagesize=PAGE_SIZE)
+            pdfmetrics.registerFont(TTFont("BellCentennial", "fonts/BellCentennialStd-Address.ttf"))
+            pdfmetrics.registerFont(TTFont("BellCentennialName", "fonts/BellCentennialStd-NameNum.ttf"))
 
-            for _, row in to_print.iterrows():
-                # Zone texte : 5x5 cm
-                x, y = 5, 5
-                width, height = 131.7, 131.7  # avec marges
-                line_height = 10
+            name_style = ParagraphStyle('name_style', fontName='BellCentennialName', fontSize=6, alignment=TA_CENTER, leading=7)
+            text_style = ParagraphStyle('text_style', fontName='BellCentennial', fontSize=5.5, alignment=TA_CENTER, leading=5.0)
+            small_text_style = ParagraphStyle('small_text', fontName='BellCentennial', fontSize=5, alignment=TA_CENTER, leading=4.8)
 
-                bloc_text = (
-                    f"<b>{row['Vendor']}</b>\n"
-                    f"<b>{row['Title']}</b>\n\n"
-                    f"<b>Contenance :</b> {row.get('custom.taille', '')}\n"
-                    f"<b>Mode d'emploi :</b> {row.get('custom.utilisation', '')}\n"
-                    f"<b>Ingrédients :</b> {row.get('custom.ingredients', '')}\n"
-                    "<b>Avertissement!</b> Usage externe uniquement. Éviter tout contact avec les yeux. "
-                    "Tenir hors de portée des enfants. En cas d'apparition de rougeurs, consultez un médecin.\n"
-                    "<b>A consommer de préférence avant le :</b> voir emballage.\n"
-                    "<b>EU RP :</b> Emmanuelle Kueny - Yoomi k-beauty, 19 rue merciere, 68100 Mulhouse, France\n"
-                    "<b>Fabriqué en Corée</b>"
+            for i, row in df_filtered.iterrows():
+                buffer = BytesIO()
+                pdf = SimpleDocTemplate(buffer, pagesize=(141.73, 141.73), leftMargin=0, rightMargin=0, topMargin=0, bottomMargin=0)
+                canvas_story = []
+
+                def make_frame_and_story(y_pos, height, content):
+                    frame = Frame(0, y_pos, 141.73, height, showBoundary=1, leftPadding=3, rightPadding=3, topPadding=0, bottomPadding=0)
+                    return (frame, content)
+
+                # Bloc Titre (haut)
+                title_story = [
+                    Paragraph(f"<b>{row.get('Vendor', '')} - {row.get('Title', '')}</b>", name_style),
+                ]
+                # Bloc Mini description + taille
+                mini_desc = str(row.get("custom.mini_description", ""))
+                taille = str(row.get("custom.taille", ""))
+                description = f"{mini_desc} - {taille}" if taille and taille.lower() != "nan" else mini_desc
+                desc_story = [Paragraph(description, text_style)]
+
+                # Bloc Utilisation
+                util = str(row.get("custom.utilisation", ""))
+                util_story = []
+                if util and util.lower() != 'nan':
+                    util_story.append(Paragraph(f"<b>Utilisation :</b> {util}", text_style))
+
+                # Bloc Avertissement + lot
+                warning_story = [
+                    Paragraph("<b>Avertissement !</b> Usage externe uniquement. Éviter tout contact avec les yeux. Tenir hors de portée des enfants. En cas d’apparition de rougeurs, de gonflements ou de démangeaisons pendant ou après l’utilisation, consultez un médecin.", text_style),
+                    Paragraph("<b>A consommer de préférence avant le / Numéro de lot :</b> indiqué sur l’emballage", small_text_style),
+                ]
+
+                # Bloc infos fabricant, etc.
+                info_story = []
+                infos = [
+                    ("Fabricant :", f"{row.get('Vendor')} EU RP : Emmanuelle Kueny - Yoomi K-Beauty, 19 rue mercière, 68100 Mulhouse, France - 03 65 67 40 62 Distributeur : ABW, 5/F, KC100, 100 Kwai Cheong Road, Kwai Chung, New territories, HongKong"),
+                ]
+                for label, value in infos:
+                    info_story.append(Paragraph(f"<b>{label}</b> {value}", small_text_style))
+                info_story.append(Paragraph("<b>Fabriqué en Corée</b>", text_style))
+                info_story.append(Paragraph("www.yoomishop.fr", small_text_style))
+
+                frames_and_stories = [
+                    make_frame_and_story(115, 15, title_story),
+                    make_frame_and_story(90, 12, desc_story),
+                    make_frame_and_story(73, 30, util_story),
+                    make_frame_and_story(55, 32, warning_story),
+                    make_frame_and_story(25, 28, info_story),
+                ]
+
+                def build_all(canvas, doc):
+                    for frame, story in frames_and_stories:
+                        frame.addFromList(story, canvas)
+
+                pdf.build([Spacer(0, 0)], onFirstPage=build_all)
+
+                buffer.seek(0)
+                doc = fitz.open(stream=buffer.getvalue(), filetype="pdf")
+                page = doc[0]
+
+                pao_value = row.get("custom.periode_mois", "")
+                pao_icon = "pao_12m.png"
+                if pd.notna(pao_value) and str(pao_value).strip() != "":
+                    try:
+                        pao_int = int(float(pao_value))
+                        pao_icon = f"pao_{pao_int}m.png"
+                    except: pass
+
+                tri_value = str(row.get("custom.texte_recyclage", "")).strip().lower().replace(" ", "_")
+                tri_icon = f"{tri_value}.png" if tri_value not in ['', 'nan'] else "tri_standard.png"
+
+                from reportlab.pdfgen.canvas import Canvas
+                icon_buffer = BytesIO()
+                icon_canvas = Canvas(icon_buffer, pagesize=(141.73, 141.73))
+                try:
+                    if os.path.exists(f"icones/{pao_icon}"):
+                        icon_canvas.drawImage(f"icones/{pao_icon}", x=6, y=5, width=20, height=20)
+                except: pass
+                try:
+                    if os.path.exists(f"icones/{tri_icon}"):
+                        icon_canvas.drawImage(f"icones/{tri_icon}", x=31, y=5, width=45, height=20)
+                except: pass
+
+                icon_canvas.save()
+                icon_buffer.seek(0)
+
+                icon_doc = fitz.open(stream=icon_buffer.getvalue(), filetype="pdf")
+                page.show_pdf_page(page.rect, icon_doc, 0)
+
+                final_buffer = BytesIO()
+                doc.save(final_buffer)
+                final_buffer.seek(0)
+
+                st.markdown(f"### 📰 Aperçu : {row['label']}")
+                pix = page.get_pixmap(dpi=200)
+                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                st.image(img)
+
+                st.download_button(
+                    label=f"📅 Télécharger {row['label']}.pdf",
+                    data=final_buffer.getvalue(),
+                    file_name=f"{row['label'].replace(' ', '_')}.pdf",
+                    mime="application/pdf"
                 )
 
-                draw_box_rich(c, x, y, width, height, bloc_text, font="BellCentennial", font_size=6.8)
-                c.showPage()
 
-                # Bloc fabricant
-                c.setFont("BellCentennial", 4.5)
-                c.drawString(6, y, "📦 Fabricant :")
-                y -= line_height
 
-                c.setFont("BellCentennial", 4.5)
-                y = wrap_and_draw(f"{row.get('Vendor', '')}", y)
-                y = wrap_and_draw(
-                    "EU RP : Emmanuelle Kueny - Yoomi k-beauty, 19 rue merciere, 68100 Mulhouse, France - 03 65 67 40 62 - SIREN 932 945 256",
-                    y
-                )
-                y = wrap_and_draw("Fabriqué en Corée", y)
-                y -= line_height
 
-                # Icônes PAO + recyclage
-                pao_val = row.get("custom.periode_mois", "")
-                try:
-                    pao_int = int(float(pao_val))
-                    pao_icon = f"icones/pao_{pao_int}m.png"
-                except:
-                    pao_icon = "icones/pao_12m.png"
 
-                tri_txt = str(row.get("custom.texte_recyclage", "")).strip().lower().replace(" ", "_")
-                tri_icon = f"icones/{tri_txt}.png" if tri_txt and tri_txt != "nan" else "icones/tri_standard.png"
 
-                x_icon = 6
-                if os.path.exists(pao_icon):
-                    c.drawImage(pao_icon, x_icon, 6, width=25, height=25, preserveAspectRatio=True)
-                    x_icon += 28
-                if os.path.exists(tri_icon):
-                    c.drawImage(tri_icon, x_icon, 6, width=25, height=25, preserveAspectRatio=True)
 
-                c.showPage()
 
-            c.save()
-            buffer.seek(0)
-
-            st.download_button(
-                label="📥 Télécharger les étiquettes PDF",
-                data=buffer,
-                file_name="etiquettes_traduction_yoomi.pdf",
-                mime="application/pdf"
-            )
-
-            # ✅ Aperçu rapide (image de la 1re page)
-            with st.expander("👁 Aperçu rapide de la première étiquette (5×5 cm)"):
-                try:
-                    pdf = fitz.open(stream=buffer.getvalue(), filetype="pdf")
-                    page = pdf.load_page(0)
-                    pix = page.get_pixmap(dpi=300)
-                    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-                    st.image(img, caption="Aperçu première page", use_column_width=False)
-                except Exception as e:
-                    st.warning(f"Impossible d'afficher un aperçu : {e}")
 
 with tab7:
     st.markdown("## 💸 Gestion des Soldes (manuelle par sélection)")
