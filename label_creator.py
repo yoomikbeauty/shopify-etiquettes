@@ -603,6 +603,8 @@ with tab1:
 
 # === 📦 MISE À JOUR STOCK FOURNISSEUR =======================
 with tab5:
+    import time
+    import requests
     st.markdown("## Mise à jour du stock via bon de commande fournisseur (STYLE KOREAN)")
     csv_fournisseur = st.file_uploader("📁 Uploader le fichier CSV fournisseur", type=["csv"])
     
@@ -689,24 +691,39 @@ with tab5:
         st.dataframe(df_merged[["Product Name", "Barcode", "Stock actuel", "Qty"]], use_container_width=True)
 
         if st.button("✅ Mettre à jour tous les stocks", key="maj_global"):
+            progress_bar = st.progress(0)
+            total = len(df_merged)
+
             for i, row in df_merged.iterrows():
                 if pd.isna(row["Inventory Item ID"]) or pd.isna(row["location_id"]):
                     st.warning(f"⚠️ Produit introuvable : {row['Product Name']}")
                     continue
+
                 payload = {
                     "location_id": int(row["location_id"]),
                     "inventory_item_id": int(row["Inventory Item ID"]),
                     "available_adjustment": int(row["Qty"])
                 }
-                resp = requests.post(
-                    f"https://{shop_url}/admin/api/2023-10/inventory_levels/adjust.json",
-                    headers={"X-Shopify-Access-Token": access_token},
-                    json=payload
-                )
-                if resp.ok:
-                    st.success(f"✔️ {row['Product Name']} → +{row['Qty']}")
-                else:
-                    st.error(f"❌ Échec : {row['Product Name']}")
+
+                for attempt in range(2):  # retry une fois si trop de requêtes
+                    resp = requests.post(
+                        f"https://{shop_url}/admin/api/2023-10/inventory_levels/adjust.json",
+                        headers={"X-Shopify-Access-Token": access_token},
+                        json=payload
+                    )
+
+                    if resp.status_code == 200:
+                        st.success(f"✔️ {row['Product Name']} → +{row['Qty']}")
+                        break
+                    elif resp.status_code == 429:
+                        st.warning(f"⏳ Trop de requêtes pour : {row['Product Name']} — nouvelle tentative dans 5s...")
+                        time.sleep(5)
+                    else:
+                        st.error(f"❌ Échec : {row['Product Name']} → {resp.status_code}")
+                        break
+
+                progress_bar.progress((i + 1) / total)
+                time.sleep(0.3)  # délai anti-quota
 
         # 🔘 MAJ individuelle sans recalcul
         st.markdown("### 🛠 Mise à jour individuelle")
