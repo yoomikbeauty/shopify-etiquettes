@@ -163,7 +163,7 @@ st.image("images/logo.png", width=250)
 st.markdown("<h1 style='text-align:center'>Créateur de carte YOOMI</h1>", unsafe_allow_html=True)
 
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["Base de données", "Étiquettes prix", "Étiquettes de traduction Fournisseur", "Étiquettes de traduction Boutique (beta)", "📦 Stock fournisseur", "📦 Gestion stock manuels", "💸 Gestion Soldes" ])
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["Base de données", "Étiquettes prix", "Étiquettes de traduction Fournisseur", "Étiquettes de traduction Boutique", "📦 Stock fournisseur", "📦 Gestion stock manuels", "💸 Gestion Soldes" ])
 
 
 
@@ -949,8 +949,7 @@ with tab4:
             from reportlab.lib.pagesizes import portrait
             from reportlab.pdfbase import pdfmetrics
             from reportlab.pdfbase.ttfonts import TTFont
-            from reportlab.platypus import SimpleDocTemplate, Paragraph, Frame
-            from reportlab.platypus import Spacer
+            from reportlab.platypus import SimpleDocTemplate, Paragraph, Frame, KeepInFrame, Spacer
             from reportlab.lib.styles import ParagraphStyle
             from reportlab.lib.enums import TA_CENTER
             from reportlab.lib.units import mm
@@ -960,61 +959,65 @@ with tab4:
             import os
             from io import BytesIO
             import pandas as pd
+            from reportlab.pdfgen.canvas import Canvas
+            from reportlab.platypus.flowables import HRFlowable
 
             pdfmetrics.registerFont(TTFont("BellCentennial", "fonts/BellCentennialStd-Address.ttf"))
-            pdfmetrics.registerFont(TTFont("BellCentennialName", "fonts/BellCentennialStd-NameNum.ttf"))
+            pdfmetrics.registerFont(TTFont("BellCentennial-Bold", "fonts/BellCentennialStd-NameNum.ttf"))
 
-            name_style = ParagraphStyle('name_style', fontName='BellCentennialName', fontSize=6, alignment=TA_CENTER, leading=7)
-            text_style = ParagraphStyle('text_style', fontName='BellCentennial', fontSize=5.5, alignment=TA_CENTER, leading=5.0)
-            small_text_style = ParagraphStyle('small_text', fontName='BellCentennial', fontSize=5, alignment=TA_CENTER, leading=4.8)
+            title_style = ParagraphStyle('title_style', fontName='Helvetica', fontSize=6, alignment=TA_CENTER, leading=5)
+            subtitle_style = ParagraphStyle('subtitle_style', fontName='Helvetica', fontSize=5, alignment=TA_CENTER, leading=5.0)
+            text_style = ParagraphStyle('text_style', fontName='Helvetica', fontSize=5, alignment=0, leading=4.8)
+            small_text_style = ParagraphStyle('small_text', fontName='Helvetica', fontSize=4.5, alignment=0, leading=4.6)
 
             for i, row in df_filtered.iterrows():
                 buffer = BytesIO()
                 pdf = SimpleDocTemplate(buffer, pagesize=(141.73, 141.73), leftMargin=0, rightMargin=0, topMargin=0, bottomMargin=0)
-                canvas_story = []
 
-                def make_frame_and_story(y_pos, height, content):
-                    frame = Frame(0, y_pos, 141.73, height, showBoundary=1, leftPadding=3, rightPadding=3, topPadding=0, bottomPadding=0)
-                    return (frame, content)
+                # Préparer les blocs (Paragraphs)
+                title_story = [Paragraph(f"<b>{row.get('Vendor', '')} - {row.get('Title', '')}</b>", title_style)]
 
-                # Bloc Titre (haut)
-                title_story = [
-                    Paragraph(f"<b>{row.get('Vendor', '')} - {row.get('Title', '')}</b>", name_style),
-                ]
-                # Bloc Mini description + taille
                 mini_desc = str(row.get("custom.mini_description", ""))
                 taille = str(row.get("custom.taille", ""))
                 description = f"{mini_desc} - {taille}" if taille and taille.lower() != "nan" else mini_desc
-                desc_story = [Paragraph(description, text_style)]
+                desc_story = [Paragraph(description, subtitle_style)]
 
-                # Bloc Utilisation
                 util = str(row.get("custom.utilisation", ""))
-                util_story = []
                 if util and util.lower() != 'nan':
-                    util_story.append(Paragraph(f"<b>Utilisation :</b> {util}", text_style))
+                    util_para = Paragraph(f"<b>Utilisation :</b> {util[:510]}..." if len(util) > 510 else f"<b>Utilisation :</b> {util}", text_style)
+                    separator_top = HRFlowable(width="100%", thickness=0.5, color=black, spaceBefore=0, spaceAfter=0)
 
-                # Bloc Avertissement + lot
-                warning_story = [
-                    Paragraph("<b>Avertissement !</b> Usage externe uniquement. Éviter tout contact avec les yeux. Tenir hors de portée des enfants. En cas d’apparition de rougeurs, de gonflements ou de démangeaisons pendant ou après l’utilisation, consultez un médecin.", text_style),
-                    Paragraph("<b>A consommer de préférence avant le / Numéro de lot :</b> indiqué sur l’emballage", small_text_style),
-                ]
+                    wrapped_util = KeepInFrame(135.73, 46, [separator_top, util_para, Spacer(1, 2)], mode='truncate')
+                    util_story = [wrapped_util]
+                else:
+                    util_story = []
 
-                # Bloc infos fabricant, etc.
-                info_story = []
-                infos = [
-                    ("Fabricant :", f"{row.get('Vendor')} EU RP : Emmanuelle Kueny - Yoomi K-Beauty, 19 rue mercière, 68100 Mulhouse, France - 03 65 67 40 62 Distributeur : ABW, 5/F, KC100, 100 Kwai Cheong Road, Kwai Chung, New territories, HongKong"),
-                ]
-                for label, value in infos:
-                    info_story.append(Paragraph(f"<b>{label}</b> {value}", small_text_style))
-                info_story.append(Paragraph("<b>Fabriqué en Corée</b>", text_style))
-                info_story.append(Paragraph("www.yoomishop.fr", small_text_style))
+                warning_text = "<b>Avertissement !</b> Usage externe uniquement. Éviter tout contact avec les yeux. Tenir hors de portée des enfants. En cas d’apparition de rougeurs, de gonflements ou de démangeaisons pendant ou après l’utilisation, consultez un médecin. <b>A consommer de préférence avant le / Numéro de lot :</b> indiqué sur l’emballage"
+                if len(warning_text) > 400:
+                    warning_text = warning_text[:400] + "..."
+                warning_para = Paragraph(warning_text, small_text_style)
+                separator_bottom = HRFlowable(width="100%", thickness=0.5, color=black, spaceBefore=0, spaceAfter=0)
+                wrapped_warning = KeepInFrame(135.73, 253, [separator_bottom, warning_para, Spacer(1, 1),separator_bottom], mode='truncate')
+                warning_story = [wrapped_warning]
 
+                vendor_text = row.get("Vendor", "")
+                info_text = f"<b>Fabricant :</b> {vendor_text} EU RP : Emmanuelle Kueny - Yoomi K-Beauty, 19 rue mercière, 68100 Mulhouse, France - 03 65 67 40 62 Distributeur : ABW, 5/F, KC100, 100 Kwai Cheong Road, Kwai Chung, New territories, HongKong. <b>Fabriqué en Corée</b>"
+                if len(info_text) > 400:
+                    info_text = info_text[:400] + "..."
+                info_para = Paragraph(info_text, small_text_style)
+                wrapped_info = KeepInFrame(135.73, 25, [info_para, Spacer(1, 2)], mode='truncate')
+                info_story = [wrapped_info]
+
+                website_info = [Paragraph("www.yoomishop.fr", small_text_style)]
+
+                # Regrouper les frames et contenus
                 frames_and_stories = [
-                    make_frame_and_story(115, 15, title_story),
-                    make_frame_and_story(90, 12, desc_story),
-                    make_frame_and_story(73, 30, util_story),
-                    make_frame_and_story(55, 32, warning_story),
-                    make_frame_and_story(25, 28, info_story),
+                    (Frame(3, 123,135.73, 15, showBoundary=0, leftPadding=0, rightPadding=0, topPadding=0, bottomPadding=0), title_story),
+                    (Frame(3, 111, 135.73, 15, showBoundary=0, leftPadding=0, rightPadding=0, topPadding=0, bottomPadding=0), desc_story),
+                    (Frame(3, 69, 135.73, 46, showBoundary=0, leftPadding=0, rightPadding=0, topPadding=0, bottomPadding=0), util_story),
+                    (Frame(3, 43, 135.73, 27, showBoundary=0, leftPadding=0, rightPadding=0, topPadding=0, bottomPadding=0), warning_story),
+                    (Frame(3, 20, 135.73, 25, showBoundary=0, leftPadding=0, rightPadding=0, topPadding=0, bottomPadding=0), info_story),
+                    (Frame(102, -18, 135.73, 28, showBoundary=0, leftPadding=0, rightPadding=0, topPadding=0, bottomPadding=0), website_info),
                 ]
 
                 def build_all(canvas, doc):
@@ -1023,6 +1026,7 @@ with tab4:
 
                 pdf.build([Spacer(0, 0)], onFirstPage=build_all)
 
+                # Ajout des icônes avec fitz
                 buffer.seek(0)
                 doc = fitz.open(stream=buffer.getvalue(), filetype="pdf")
                 page = doc[0]
@@ -1033,22 +1037,30 @@ with tab4:
                     try:
                         pao_int = int(float(pao_value))
                         pao_icon = f"pao_{pao_int}m.png"
-                    except: pass
+                    except:
+                        pass
 
                 tri_value = str(row.get("custom.texte_recyclage", "")).strip().lower().replace(" ", "_")
                 tri_icon = f"{tri_value}.png" if tri_value not in ['', 'nan'] else "tri_standard.png"
+                logo_icon = "logo.png"
 
-                from reportlab.pdfgen.canvas import Canvas
                 icon_buffer = BytesIO()
                 icon_canvas = Canvas(icon_buffer, pagesize=(141.73, 141.73))
                 try:
                     if os.path.exists(f"icones/{pao_icon}"):
-                        icon_canvas.drawImage(f"icones/{pao_icon}", x=6, y=5, width=20, height=20)
-                except: pass
+                        icon_canvas.drawImage(f"icones/{pao_icon}", x=1, y=5, width=20, height=20)
+                except:
+                    pass
                 try:
                     if os.path.exists(f"icones/{tri_icon}"):
-                        icon_canvas.drawImage(f"icones/{tri_icon}", x=31, y=5, width=45, height=20)
-                except: pass
+                        icon_canvas.drawImage(f"icones/{tri_icon}", x=20, y=5, width=80, height=20)
+                except:
+                    pass
+                try:
+                    if os.path.exists(f"icones/{logo_icon}"):
+                        icon_canvas.drawImage(f"icones/{logo_icon}", x=99, y=11, width=40, height=14)
+                except:
+                    pass
 
                 icon_canvas.save()
                 icon_buffer.seek(0)
@@ -1071,6 +1083,8 @@ with tab4:
                     file_name=f"{row['label'].replace(' ', '_')}.pdf",
                     mime="application/pdf"
                 )
+
+
 
 
 
