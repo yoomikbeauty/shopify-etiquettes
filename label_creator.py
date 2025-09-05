@@ -387,15 +387,29 @@ with tab1:
 
         with tab2:
             st.markdown("## Création d’étiquettes prix")
+            # Helpers anti-"nan"
+            def filled(v):
+                return pd.notna(v) and str(v).strip() != '' and str(v).strip().lower() != 'nan'
+
+            def text(v):
+                return str(v).strip() if filled(v) else ''
+
             # Choix des produits à étiqueter
             st.markdown("### Étiquettes à imprimer")
-            df['label'] = df['Vendor'] + ' - ' + df['Title'] + df['custom.taille'].apply(lambda x: f" ({x})" if pd.notna(x) and str(x).strip() != '' else '')
-            df = df.sort_values('ID', ascending=False)  # Tri par ID Shopify (plus récent en haut)
-            df = df.reset_index(drop=True)
-            selected_labels = st.multiselect("Sélectionnez les produits à imprimer : (8 max par page)", options=df['label'].tolist(),
-            placeholder="Choisissez un ou plusieurs produits...")
+            # Label lisible même si certaines colonnes sont vides
+            tailles = df['custom.taille'].apply(lambda x: f" ({text(x)})" if filled(x) else '')
+            vendors = df['Vendor'].fillna('').astype(str)
+            titles  = df['Title'].fillna('').astype(str)
+
+            df['label'] = (vendors + ' - ' + titles + tailles).str.replace(r'^\s*-\s*', '', regex=True).str.strip()
+            df = df.sort_values('ID', ascending=False).reset_index(drop=True)
+
+            selected_labels = st.multiselect(
+                "Sélectionnez les produits à imprimer : (8 max par page)",
+                options=df['label'].tolist(),
+                placeholder="Choisissez un ou plusieurs produits..."
+            )
             filtered_df = df[df['label'].isin(selected_labels)].reset_index(drop=True)
-            
 
             if st.button("Générer les étiquettes PDF (8 par page)") and not filtered_df.empty:
                 buffer = BytesIO()
@@ -414,190 +428,155 @@ with tab1:
                     x = margin_x + col * label_width
                     y = height - margin_y - (row_pos + 1) * label_height
 
-            
-                    
-                    
-
-                    # CADRE de l'étiquette
+                    # CADRE
                     c.setFont("Helvetica", 8)
-                    
                     c.setStrokeColorRGB(0, 0, 0)
                     c.rect(x, y, label_width, label_height, stroke=0, fill=0)
-        
-
-
 
                     # VENDOR
                     c.setFont("IbarraRealNova-SemiBold", 11.5)
-                    if 'Vendor' in row:
+                    if filled(row.get('Vendor')):
                         vendor_text = c.beginText()
                         vendor_text.setTextOrigin(x + 2.5 * mm, y + label_height - 5 * mm)
-                        wrapped_vendor = textwrap.wrap(row['Vendor'], width=28)
-                        for line in wrapped_vendor[:2]:
+                        for line in textwrap.wrap(text(row.get('Vendor')), width=28)[:2]:
                             vendor_text.textLine(line)
                         c.drawText(vendor_text)
 
                     # Séparateur après Vendor
                     c.setLineWidth(0.1)
-                    c.line(x + 0 * mm, y + label_height - 6.5 * mm, x + label_width - 0 * mm, y + label_height - 6.5 * mm)
+                    c.line(x, y + label_height - 6.5 * mm, x + label_width, y + label_height - 6.5 * mm)
 
-                    # TAILLE
-                    taille_val = str(row.get('custom.taille', '')).strip()
-                    if taille_val and taille_val.lower() != 'nan':
+                    # TAILLE (à droite, si dispo)
+                    if filled(row.get('custom.taille')):
                         c.setFont("IbarraRealNova-SemiBold", 11.5)
-                        c.drawRightString(x + label_width - 2.5 * mm, y + label_height - 5 * mm, taille_val)
+                        c.drawRightString(x + label_width - 2.5 * mm, y + label_height - 5 * mm, text(row.get('custom.taille')))
 
                     # TITRE
-                    c.setFont("IbarraRealNova-Bold", 14)
-                    if 'Title' in row:
-                        wrapped_title = textwrap.wrap(row['Title'], width=30)
+                    if filled(row.get('Title')):
+                        c.setFont("IbarraRealNova-Bold", 14)
+                        wrapped_title = textwrap.wrap(text(row.get('Title')), width=30)
                         line_height = 13
                         total_lines = len(wrapped_title[:2])
                         for idx, line in enumerate(wrapped_title[:2]):
                             text_width = pdfmetrics.stringWidth(line, "IbarraRealNova-Bold", 14)
-                            # Si une seule ligne, centré verticalement
                             y_offset = y + label_height - 14 * mm if total_lines == 1 else y + label_height - 12 * mm - (idx * line_height)
                             c.drawString(x + (label_width - text_width) / 2, y_offset, line)
 
                     # Séparateur après Titre
                     c.setLineWidth(0.1)
-                    c.line(x + 0 * mm, y + label_height - 18 * mm, x + label_width - 0 * mm, y + label_height - 18 * mm)
-
-
+                    c.line(x, y + label_height - 18 * mm, x + label_width, y + label_height - 18 * mm)
 
                     # DESCRIPTION
-                    if 'custom.moyenne_description' in row:
+                    if filled(row.get('custom.moyenne_description')):
                         c.setFont("AdobeSansMM", 7.5)
-                        desc = str(row['custom.moyenne_description'])
+                        desc = text(row.get('custom.moyenne_description'))
                         line_height = 10.2
                         for idx, line in enumerate(textwrap.wrap(desc, width=61.5)):
                             c.drawString(x + 2.5 * mm, y + label_height - 22 * mm - (idx * line_height), line)
 
-            # Séparateur après Description (gris)
+                    # Séparateur (gris)
                     c.setLineWidth(0.1)
                     c.setStrokeColorRGB(0.7, 0.7, 0.7)
-                    c.line(x + 0 * mm, y + label_height - 38 * mm, x + label_width - 0 * mm, y + label_height - 38 * mm)
+                    c.line(x, y + label_height - 38 * mm, x + label_width, y + label_height - 38 * mm)
                     c.setStrokeColorRGB(0, 0, 0)
-                            
 
-
-                    # ROUTINE (étape)
-                    routine_val = str(row.get('custom.routine', '')).strip()
-                    if routine_val and routine_val.lower() != 'nan':
+                    # ROUTINE
+                    if filled(row.get('custom.routine')):
                         c.setFont("IbarraRealNova-Regular", 7)
-                        c.setFillColorRGB(0.4, 0.4, 0.4)  # Gris
-                        c.drawRightString(x + label_width - 2.5 * mm, y + 9 * mm, f"Étape n° {routine_val}")
-                        c.setFillColorRGB(0, 0, 0)  # Réinitialise la couleur
-
+                        c.setFillColorRGB(0.4, 0.4, 0.4)
+                        c.drawRightString(x + label_width - 2.5 * mm, y + 9 * mm, f"Étape n° {text(row.get('custom.routine'))}")
+                        c.setFillColorRGB(0, 0, 0)
 
                     # ICONES CONDITIONNELLES
                     icon_size = 12 * mm
                     icon_y = y + label_height - 53 * mm
                     icon_x = x + 2 * mm
-                    if str(row.get('custom.info_vegan', '')).lower() == 'true':
+                    if str(row.get('custom.info_vegan', '')).strip().lower() == 'true':
                         try:
                             c.drawImage("images/vegan.png", icon_x, icon_y, width=icon_size, height=icon_size, preserveAspectRatio=True)
-                            icon_x += icon_size + 0
-                        except Exception as e:
-                            c.setFillColorRGB(1, 0, 0)
-                            c.rect(icon_x, icon_y, icon_size, icon_size, fill=1)
-                            icon_x += icon_size + 0
-                    if str(row.get('custom.info_cruelty_free', '')).lower() == 'true':
+                            icon_x += icon_size
+                        except Exception:
+                            c.setFillColorRGB(1, 0, 0); c.rect(icon_x, icon_y, icon_size, icon_size, fill=1); icon_x += icon_size
+                    if str(row.get('custom.info_cruelty_free', '')).strip().lower() == 'true':
                         try:
                             c.drawImage("images/cruelty.png", icon_x, icon_y, width=icon_size, height=icon_size, preserveAspectRatio=True)
-                            icon_x += icon_size + 0
-                        except Exception as e:
-                            c.setFillColorRGB(1, 0, 0)
-                            c.rect(icon_x, icon_y, icon_size, icon_size, fill=1)
-                            icon_x += icon_size + 0
-                    if str(row.get('custom.info_clean_beauty', '')).lower() == 'true':
+                            icon_x += icon_size
+                        except Exception:
+                            c.setFillColorRGB(1, 0, 0); c.rect(icon_x, icon_y, icon_size, icon_size, fill=1); icon_x += icon_size
+                    if str(row.get('custom.info_clean_beauty', '')).strip().lower() == 'true':
                         try:
                             c.drawImage("images/clean.png", icon_x, icon_y, width=icon_size, height=icon_size, preserveAspectRatio=True)
-                            icon_x += icon_size + 0
-                        except Exception as e:
-                            c.setFillColorRGB(1, 0, 0)
-                            c.rect(icon_x, icon_y, icon_size, icon_size, fill=1)
-                            icon_x += icon_size + 0
+                            icon_x += icon_size
+                        except Exception:
+                            c.setFillColorRGB(1, 0, 0); c.rect(icon_x, icon_y, icon_size, icon_size, fill=1); icon_x += icon_size
 
-                    # TYPE DE PEAU
+                    # TYPE DE PEAU / CHEVEUX
                     types = []
-                    if row['Type'] == 'P':
-                        if str(row.get('custom.tout_type', '')).lower() in ['true', '1']: types.append("• tout type")
-                        if str(row.get('custom.peau_acneique', '')).lower() in ['true', '1']: types.append("• acnéique")
-                        if str(row.get('custom.peau_grasse', '')).lower() in ['true', '1']: types.append("• grasse")
-                        if str(row.get('custom.peau_seche', '')).lower() in ['true', '1']: types.append("• sèche")
-                        if str(row.get('custom.peau_sensible', '')).lower() in ['true', '1']: types.append("• sensible")
-                        if str(row.get('custom.peau_mature', '')).lower() in ['true', '1']: types.append("• mature")
-                        label = "Type de peau :"
-                    elif row['Type'] == 'C':
-                        if str(row.get('custom.tout_type', '')).lower() in ['true', '1']: types.append("• tout type")
-                        if str(row.get('custom.peau_grasse', '')).lower() in ['true', '1']: types.append("• gras")
-                        if str(row.get('custom.peau_seche', '')).lower() in ['true', '1']: types.append("• sec")
-                        if str(row.get('custom.peau_sensible', '')).lower() in ['true', '1']: types.append("• sensible")
-                        label = "Type de cheveux :"
+                    t = text(row.get('Type'))
+                    if t == 'P':
+                        if str(row.get('custom.tout_type', '')).strip().lower() in ['true', '1']: types.append("• tout type")
+                        if str(row.get('custom.peau_acneique', '')).strip().lower() in ['true', '1']: types.append("• acnéique")
+                        if str(row.get('custom.peau_grasse', '')).strip().lower() in ['true', '1']: types.append("• grasse")
+                        if str(row.get('custom.peau_seche', '')).strip().lower() in ['true', '1']: types.append("• sèche")
+                        if str(row.get('custom.peau_sensible', '')).strip().lower() in ['true', '1']: types.append("• sensible")
+                        if str(row.get('custom.peau_mature', '')).strip().lower() in ['true', '1']: types.append("• mature")
+                        label_type = "Type de peau :"
+                    elif t == 'C':
+                        if str(row.get('custom.tout_type', '')).strip().lower() in ['true', '1']: types.append("• tout type")
+                        if str(row.get('custom.peau_grasse', '')).strip().lower() in ['true', '1']: types.append("• gras")
+                        if str(row.get('custom.peau_seche', '')).strip().lower() in ['true', '1']: types.append("• sec")
+                        if str(row.get('custom.peau_sensible', '')).strip().lower() in ['true', '1']: types.append("• sensible")
+                        label_type = "Type de cheveux :"
                     else:
-                        types = []
-                        label = ""
+                        label_type = ""
+
                     if types:
                         c.setFont("NotoSans-Italic", 9)
-                        line = f"{label} {' '.join(types)}"
-                        c.drawRightString(x + label_width - 2.5 * mm, y + label_height - 42 * mm, line)
+                        c.drawRightString(x + label_width - 2.5 * mm, y + label_height - 42 * mm, f"{label_type} {' '.join(types)}")
 
+                    c.setFillColorRGB(0, 0, 0)
 
-                    c.setFillColorRGB(0, 0, 0)  # Réinitialiser la couleur pour le texte
+                    # PRIX + PRIX BARRÉ
+                    if filled(row.get('Variant Price')):
+                        try:
+                            prix = float(str(row.get('Variant Price')).replace(',', '.'))
+                            prix_str = f"{prix:.2f}".replace('.', ',') + "€"
 
+                            affiche_compare = False
+                            cp = row.get('Variant Compare Price')
+                            if filled(cp):
+                                try:
+                                    compare_price_float = float(str(cp).replace(',', '.'))
+                                    if compare_price_float > prix:
+                                        affiche_compare = True
+                                        c.setFont("IbarraRealNova-Regular", 14)
+                                        compare_price_str = f"{compare_price_float:.2f}".replace('.', ',') + "€"
+                                        text_width = pdfmetrics.stringWidth(compare_price_str, "IbarraRealNova-Regular", 10)
+                                        compare_price_x = x + label_width - 30 * mm - text_width
+                                        compare_price_y = y + 3 * mm
+                                        c.setFillColorRGB(0, 0, 0)
+                                        c.drawString(compare_price_x, compare_price_y, compare_price_str)
+                                        c.setLineWidth(0.5)
+                                        c.line(compare_price_x, compare_price_y + 4, compare_price_x + text_width, compare_price_y + 4)
+                                        c.setFillColorRGB(0, 0, 0)
+                                except Exception:
+                                    pass  # mauvaise donnée compare price: on ignore
 
-                    # PRIX AVEC PRIX BARRÉ SI DISPONIBLE
-                    try:
-                        prix = float(row['Variant Price'])
-                        prix_str = f"{prix:.2f}".replace('.', ',') + "€"
-
-                        compare_price = row.get('Variant Compare Price', None)
-                        affiche_compare = False
-
-                        if compare_price not in [None, '', 'nan']:
-                            try:
-                                compare_price_float = float(compare_price)
-                                if compare_price_float > prix:
-                                    affiche_compare = True
-                                    # Affichage du prix barré en gris au-dessus du prix actuel
-                                    c.setFont("IbarraRealNova-Regular", 14)
-                                    compare_price_str = f"{compare_price_float:.2f}".replace('.', ',') + "€"
-                                    text_width = pdfmetrics.stringWidth(compare_price_str, "IbarraRealNova-Regular", 10)
-                                    compare_price_x = x + label_width - 30 * mm - text_width
-                                    compare_price_y = y + 3 * mm
-
-                                    # Texte gris
-                                    c.setFillColorRGB(0, 0, 0)
-                                    c.drawString(compare_price_x, compare_price_y, compare_price_str)
-
-                                    # Ligne barrée
-                                    c.setLineWidth(0.5)
-                                    c.line(compare_price_x, compare_price_y + 4, compare_price_x + text_width, compare_price_y + 4)
-
-                                    c.setFillColorRGB(0, 0, 0)  # reset color
-                            except:
-                                pass  # en cas de mauvaise donnée de compare price
-
-                        # Prix actuel affiché en grand dans tous les cas
-                        c.setFont("IbarraRealNova-Bold", 20)
-                        if affiche_compare:
-                            # Si soldé, affichage en rouge
-                            c.setFillColorRGB(1, 0, 0)
-                        else:
-                            # Sinon, noir
+                            c.setFont("IbarraRealNova-Bold", 20)
+                            c.setFont("IbarraRealNova-Bold", 20)
+                            if affiche_compare:
+                                c.setFillColorRGB(1, 0, 0)
+                            else:
+                                c.setFillColorRGB(0, 0, 0)
+                            c.drawRightString(x + label_width - 2.5 * mm, y + 3 * mm, prix_str)
                             c.setFillColorRGB(0, 0, 0)
+                            c.drawRightString(x + label_width - 2.5 * mm, y + 3 * mm, prix_str)
+                            c.setFillColorRGB(0, 0, 0)
+                        except Exception as e:
+                            c.setFont("Helvetica", 8)
+                            c.drawString(x + 2 * mm, y + 3 * mm, f"Erreur prix: {e}")
 
-                        c.drawRightString(x + label_width - 2.5 * mm, y + 3 * mm, prix_str)
-                        c.setFillColorRGB(0, 0, 0)  # reset après écriture
-                    except Exception as e:
-                        c.setFont("Helvetica", 8)
-                        c.drawString(x + 2 * mm, y + 3 * mm, f"Erreur prix: {e}")
-
-
-                        
                 c.save()
-
                 buffer.seek(0)
                 st.download_button(
                     label="Télécharger les étiquettes en PDF",
@@ -605,6 +584,7 @@ with tab1:
                     file_name="etiquettes_shopify.pdf",
                     mime="application/pdf",
                 )
+
 
 
 # === 📦 MISE À JOUR STOCK FOURNISSEUR =======================
