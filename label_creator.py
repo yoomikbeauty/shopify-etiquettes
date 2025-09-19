@@ -16,6 +16,141 @@ from reportlab.pdfgen import canvas
 from reportlab.lib.units import mm
 from io import BytesIO
 
+# --- QUDO TXT parsing ---------------------------------------------------------
+import re
+import pandas as pd
+
+def parse_qudo_text_to_df(text: str, include_samples: bool = False) -> pd.DataFrame:
+    """
+    Attend des lignes du type:
+      1 (8809738316993) Beauty of Joseon - Red Bean Water Gel 100ml pcs 15 8.00 120.00 0.00
+      2 (MOSTRE) Sample cream 2ml pcs 1 0.01 0.01 0.00
+    Retourne: Product Name, Barcode, Unit, Qty, Unit Price EUR, Line Value EUR, VAT EUR
+    """
+    s = (text or "").replace("–", "-").replace("—", "-")
+    s = re.sub(r"[ \t]+", " ", s).strip()
+
+    pat = re.compile(
+        r"""
+        \b\d+\s*                                  # index
+        \((?P<bc>\d{8,14}|MOSTRE)\)\s+            # (barcode|MOSTRE)
+        (?P<name>.+?)\s+                          # nom (non-gourmand)
+        (?P<unit>pcs|set|box|ea)\s+               # unité
+        (?P<qty>\d+)\s+                           # quantité
+        (?P<unit_price>\d+[.,]?\d*)\s+            # prix unitaire
+        (?P<value>\d+[.,]?\d*)\s+                 # montant ligne
+        (?P<vat>\d+[.,]?\d*)                      # tva
+        """,
+        re.IGNORECASE | re.VERBOSE | re.DOTALL
+    )
+
+    rows = []
+    for m in pat.finditer(s):
+        bc = m.group("bc").strip()
+        if (not include_samples) and bc.upper() == "MOSTRE":
+            continue
+
+        def fnum(x): return float(str(x).replace(",", "."))
+        rows.append({
+            "Product Name": m.group("name").strip(" -"),
+            "Barcode": bc,
+            "Unit": m.group("unit").lower(),
+            "Qty": int(m.group("qty")),
+            "Unit Price EUR": fnum(m.group("unit_price")),
+            "Line Value EUR": fnum(m.group("value")),
+            "VAT EUR": fnum(m.group("vat")),
+        })
+    return pd.DataFrame(rows)
+
+def parse_qudo_name(raw: str, default_vendor: str = "") -> dict:
+    """
+    Découpe 'Vendor - Title Size' (ou juste 'Vendor Title Size').
+    Extrait Vendor, Title, Size (ml/g/oz/kg/l/cl/mg).
+    """
+    s = str(raw or "").strip().replace("–", "-").replace("—", "-")
+    vendor = default_vendor
+    # vendor si "Vendor - Title"
+    m_dash = re.match(r"^\s*([^-\[\]]{2,}?)\s*-\s*(.+)$", s)
+    if m_dash:
+        vendor = m_dash.group(1).strip()
+        main = m_dash.group(2).strip()
+    else:
+        main = s
+
+    size_pat = r"(\d+(?:[.,]\d+)?)\s*(ml|g|kg|l|cl|mg|oz)\b"
+    sizes = list(re.finditer(size_pat, main, flags=re.I))
+    size = ""
+    if sizes:
+        q, u = sizes[-1].group(1), sizes[-1].group(2)
+        size = f"{q.replace(',', '.')} {u.lower()}"
+        start, end = sizes[-1].span()
+        if end == len(main) or re.match(r"\s*$", main[end:]):
+            main = main[:start].strip()
+
+    # title-case doux
+    small = {'de','du','des','la','le','les','et','ou','à','au','aux','the','of','for','and','in','on','with'}
+    words, out = main.split(), []
+    for i,w in enumerate(words):
+        if w.isupper() and len(w) <= 4: out.append(w)
+        elif w.lower() in small and i not in (0, len(words)-1): out.append(w.lower())
+        else: out.append(w.capitalize())
+    title = " ".join(out).strip()
+
+    return {"Vendor": vendor, "Title": title, "Size": size}
+
+import math
+import re
+
+def price_rounding(raw_price: float, mode: str):
+    """Arrondis classiques pour calcul de PV conseillé."""
+    if raw_price is None:
+        return None
+    if mode == ".90 (vers le bas)":
+        euros = math.floor(raw_price)
+        cents = raw_price - euros
+        if cents >= 0.90:
+            price = euros + 0.90
+        else:
+            price = (euros - 1) + 0.90 if euros > 0 else 0.90
+        return round(price, 2)
+    elif mode == "0,10 le + proche":
+        return round(round(raw_price * 10) / 10.0, 2)
+    elif mode == ".95 (vers le bas)":
+        euros = math.floor(raw_price)
+        cents = raw_price - euros
+        if cents >= 0.95:
+            price = euros + 0.95
+        else:
+            price = (euros - 1) + 0.95 if euros > 0 else 0.95
+        return round(price, 2)
+    elif mode == "arrondi sup. à 0,05":
+        return round(math.ceil(raw_price * 20) / 20.0, 2)
+    else:
+        return round(raw_price, 2)
+
+def parse_weight_to_grams(val):
+    """
+    Parse '208g', '0.2 kg', '7 oz', '1 lb' -> grammes (float).
+    """
+    if pd.isna(val):
+        return None
+    s = str(val).strip()
+    m = re.search(r"(\d+(?:[.,]\d+)?)\s*(kg|g|oz|lb)\b", s, flags=re.I)
+    if not m:
+        return None
+    q = float(m.group(1).replace(",", "."))
+    unit = m.group(2).lower()
+    if unit == "kg":
+        return q * 1000.0
+    if unit == "g":
+        return q
+    if unit == "lb":
+        return q * 453.59237
+    if unit == "oz":
+        return q * 28.349523125
+    return None
+
+
 
 from html.parser import HTMLParser
 
@@ -337,39 +472,60 @@ with tab1:
     if 'df' in st.session_state:
         df = st.session_state['df']
         with st.expander("### 🔍 Filtrer à partir d’un fichier de commande"):
+            source_cmd = st.selectbox(
+                "Source du bon",
+                ["StyleKorean (CSV)", "QUDO (TXT)"],
+                key="src_cmd_tab1"
+            )
 
+            df_filtered_by_cmd = None
+            barcodes_non_trouves = []
 
-            commande_file = st.file_uploader("Uploader un fichier CSV de commande", type=["csv"])
-            if commande_file:
-                try:
-                    df_commande = pd.read_csv(commande_file)
+            if source_cmd == "StyleKorean (CSV)":
+                commande_csv = st.file_uploader("📁 Uploader le fichier CSV StyleKorean", type=["csv"], key="cmd_csv_tab1")
+                if commande_csv:
+                    try:
+                        df_commande = pd.read_csv(commande_csv)
 
-                    # Extraction du barcode depuis le Product Name
-                    def extraire_barcode(nom):
-                        match = re.search(r'barcode[\s:-]*([\d]{8,14})', str(nom), re.IGNORECASE)
-                        return match.group(1) if match else None
+                        def extraire_barcode(nom):
+                            m = re.search(r'barcode[\s:-]*([\d]{8,14})', str(nom), re.IGNORECASE)
+                            return m.group(1) if m else None
 
-                    df_commande['extracted_barcode'] = df_commande['Product Name'].apply(extraire_barcode)
-                    barcodes_commande = df_commande['extracted_barcode'].dropna().unique().tolist()
+                        df_commande["extracted_barcode"] = df_commande["Product Name"].apply(extraire_barcode)
+                        barcodes_commande = df_commande["extracted_barcode"].dropna().unique().tolist()
 
-                    if len(barcodes_commande) > 0:
-                        df_barcodes = df['Variant Barcode'].astype(str)
+                        if barcodes_commande:
+                            df_barcodes = df["Variant Barcode"].astype(str)
+                            barcodes_trouves = df_barcodes[df_barcodes.isin(barcodes_commande)].unique().tolist()
+                            barcodes_non_trouves = sorted(set(barcodes_commande) - set(barcodes_trouves))
+                            df = df[df["Variant Barcode"].astype(str).isin(barcodes_commande)]
+                            st.success(f"{len(df)} produits trouvés (sur {len(barcodes_commande)} barcodes du bon).")
+                        else:
+                            st.warning("Aucun code-barres valide trouvé dans le CSV.")
+                    except Exception as e:
+                        st.error(f"Erreur lecture CSV : {e}")
+
+            else:  # QUDO (TXT)
+                commande_txt = st.file_uploader("📄 Uploader le fichier texte QUDO", type=["txt"], key="cmd_txt_tab1")
+                if commande_txt:
+                    try:
+                        content = commande_txt.read().decode("utf-8", errors="ignore")
+                        df_txt = parse_qudo_text_to_df(content, include_samples=False)
+                        st.dataframe(df_txt[["Product Name","Barcode","Qty"]], use_container_width=True)
+                        barcodes_commande = df_txt["Barcode"].astype(str).unique().tolist()
+
+                        df_barcodes = df["Variant Barcode"].astype(str)
                         barcodes_trouves = df_barcodes[df_barcodes.isin(barcodes_commande)].unique().tolist()
                         barcodes_non_trouves = sorted(set(barcodes_commande) - set(barcodes_trouves))
+                        df = df[df["Variant Barcode"].astype(str).isin(barcodes_commande)]
+                        st.success(f"{len(df)} produits trouvés (sur {len(barcodes_commande)} barcodes du bon).")
+                    except Exception as e:
+                        st.error(f"Erreur lecture TXT : {e}")
 
-                        df = df[df['Variant Barcode'].astype(str).isin(barcodes_commande)]
-                        st.success(f"{len(df)} produits trouvés avec les barcodes extraits ({len(barcodes_commande)} attendus).")
-
-                    if barcodes_non_trouves:
-                        lignes_non_trouvees = df_commande[df_commande['extracted_barcode'].isin(barcodes_non_trouves)]
-                        with st.expander("⚠️ Produits non trouvés dans Shopify (clique pour afficher)"):
-                            st.write(f"{len(barcodes_non_trouves)} articles ignorés car non trouvés dans la base :")
-                            for _, row in lignes_non_trouvees.iterrows():
-                                st.markdown(f"- `{row['Product Name']}`")
-                    else:
-                        st.warning("Aucun code barre valide n’a été extrait.")
-                except Exception as e:
-                    st.error(f"Erreur lors du traitement du fichier : {e}")
+            if barcodes_non_trouves:
+                with st.expander("⚠️ Barcodes non trouvés dans Shopify"):
+                    for bc in barcodes_non_trouves:
+                        st.markdown(f"- `{bc}`")
 
         st.dataframe(df, use_container_width=True)
         # 👉 Sauver ce qui est VRAIMENT affiché en tab1 pour réutilisation ailleurs
@@ -1322,9 +1478,13 @@ with tab7:
 
 
 # --- Onglet 8 : Nouveaux produits depuis CSV + prix + poids ---
+# --- Onglet 8 : Nouveaux produits depuis CSV ou TXT QUDO ---
 with tab8:
-    st.markdown("## ➕ Nouveaux produits (CSV fournisseur) — parsing + prix + poids")
-    st.write("Analyse le CSV (Product Name + BarCode) + Retail Price + Weight. Calcule le PV, crée en **brouillon**, enregistre le **coût** et le **poids**.")
+    st.markdown("## ➕ Nouveaux produits — parsing + prix + poids")
+    st.write(
+        "Choisis la source (CSV StyleKorean **ou** TXT QUDO). "
+        "Calcule les PV, crée en **brouillon**, enregistre le **coût** et le **poids**."
+    )
 
     # --- Shopify creds
     shop_url = st.secrets["shopify"]["shop_url"]
@@ -1332,343 +1492,325 @@ with tab8:
     api_version = "2024-01"
     headers = {"X-Shopify-Access-Token": access_token, "Content-Type": "application/json"}
 
-    import re, time, requests, math
+    import math, time, requests, re
 
-    # ---------- Helpers ----------
-    def parse_product_name(raw: str):
-        """
-        Exemple :
-        "[ANUA] [EU] [RENEW] HEARTLEAF QUERCETINOL PORE DEEP CLEANSING FOAM 150ml
-         BarCode: 8809640735622 ( Pieces per box : 40 ea )"
-        -> Vendor, Title, Size (ex '150 ml'), Barcode (8-14 chiffres)
-        """
-        s = str(raw or "").strip()
-
-        # BARCODE après "Barcode:"
-        m_bc = re.search(r'(?i)bar\s*code\s*[:\-]?\s*([0-9]{8,14})', s)
-        barcode = m_bc.group(1) if m_bc else None
-
-        # VENDOR = premier [ ... ]
-        m_vendor = re.search(r'^\s*\[([^\]]+)\]', s)
-        vendor = m_vendor.group(1).strip() if m_vendor else ""
-
-        # Partie principale (avant "Barcode")
-        main = re.split(r'(?i)bar\s*code\s*[:\-]?', s)[0]
-        # Retirer tous les [ ... ] initiaux
-        main = re.sub(r'^\s*(?:\[[^\]]+\]\s*)+', '', main).strip()
-
-        # Taille = dernière occurrence qty+unité
-        size_pat = r'(\d+(?:[.,]\d+)?)\s*(ml|mL|ML|g|G|kg|KG|l|L|cl|CL|mg|MG|oz|OZ)\b'
-        m_sizes = list(re.finditer(size_pat, main))
-        size = ""
-        if m_sizes:
-            qty, unit = m_sizes[-1].group(1), m_sizes[-1].group(2)
-            size = f"{qty.replace(',', '.')} {unit.lower()}"
-            start, end = m_sizes[-1].span()
-            if end == len(main) or re.match(r'\s*$', main[end:]):
-                main = main[:start].strip()
-            else:
-                main = (main[:start] + main[end:]).strip()
-
-        main = re.sub(r'\s{2,}', ' ', main).strip()
-
-        # Title Case "intelligent"
-        def smart_title(t):
-            words = t.split()
-            out = []
-            small = {'de','du','des','la','le','les','et','ou','à','au','aux','the','of','for','and','in','on','with'}
-            for i,w in enumerate(words):
-                if w.isupper() and len(w) <= 4:
-                    out.append(w)  # AHA, EU, SPF...
-                elif w.lower() in small and i not in (0, len(words)-1):
-                    out.append(w.lower())
-                else:
-                    out.append(w.capitalize())
-            return ' '.join(out)
-        title = smart_title(main) if main else ""
-
-        return {"Vendor": vendor, "Title": title, "Size": size, "Barcode": barcode}
-
-    @st.cache_data(ttl=600)
-    def fetch_all_barcodes_from_shopify(shop_url, headers, api_version="2024-01"):
-        """Retourne tous les barcodes (str) des variantes Shopify, via pagination."""
-        all_barcodes = set()
-        url = f"https://{shop_url}/admin/api/{api_version}/products.json?limit=250&fields=variants"
-        while url:
-            resp = requests.get(url, headers=headers)
-            if resp.status_code != 200:
-                break
-            for p in resp.json().get("products", []):
-                for v in p.get("variants", []):
-                    bc = v.get("barcode")
-                    if bc:
-                        all_barcodes.add(str(bc))
-            link = resp.headers.get("Link", "")
-            next_url = None
-            if 'rel="next"' in link:
-                parts = link.split(",")
-                for part in parts:
-                    if 'rel="next"' in part:
-                        next_url = part.split(";")[0].strip().strip("<>").replace(" ", "")
-            url = next_url
-        return all_barcodes
-
-    def extract_usd_from_retail(retail_raw: str):
-        """
-        Retail Price :
-          'KRW 14,000\\n5.55\\n53.00%'  -> prend la **2e valeur** numérique (USD : 5.55).
-        """
-        if pd.isna(retail_raw):
-            return None
-        s = str(retail_raw)
-        lines = [x.strip() for x in re.split(r'[\r\n]+', s) if x.strip()]
-        nums = []
-        for ln in lines:
-            m = re.search(r'(\d[\d,]*\.?\d*)', ln)
-            if m:
-                try:
-                    val = float(m.group(1).replace(',', ''))
-                    nums.append(val)
-                except:
-                    pass
-        if len(nums) >= 2:
-            return nums[1]
-        elif len(nums) == 1:
-            return nums[0]
-        return None
-
-    def parse_weight_to_grams(val):
-        """
-        Parse '208g', '0.2 kg', '7 oz', '1 lb' -> grammes (float).
-        """
-        if pd.isna(val):
-            return None
-        s = str(val).strip()
-        m = re.search(r'(\d+(?:[.,]\d+)?)\s*(kg|g|oz|lb)\b', s, flags=re.I)
-        if not m:
-            return None
-        q = float(m.group(1).replace(',', '.'))
-        unit = m.group(2).lower()
-        if unit == 'kg':
-            return q * 1000.0
-        if unit == 'g':
-            return q
-        if unit == 'lb':
-            return q * 453.59237
-        if unit == 'oz':
-            return q * 28.349523125
-        return None
-
-    def price_rounding(raw_price: float, mode: str):
-        """Styles d'arrondis retail usuels."""
-        if raw_price is None:
-            return None
-        if mode == ".90 (vers le bas)":
-            euros = math.floor(raw_price)
-            cents = raw_price - euros
-            if cents >= 0.90:
-                price = euros + 0.90
-            else:
-                price = (euros - 1) + 0.90 if euros > 0 else 0.90
-            return round(price, 2)
-        elif mode == "0,10 le + proche":
-            return round(round(raw_price * 10) / 10.0, 2)
-        elif mode == ".95 (vers le bas)":
-            euros = math.floor(raw_price)
-            cents = raw_price - euros
-            if cents >= 0.95:
-                price = euros + 0.95
-            else:
-                price = (euros - 1) + 0.95 if euros > 0 else 0.95
-            return round(price, 2)
-        elif mode == "arrondi sup. à 0,05":
-            return round(math.ceil(raw_price * 20) / 20.0, 2)
-        else:
-            return round(raw_price, 2)
-
-    # ---------- Barcodes existants ----------
+    # ---------- barcodes déjà existants ----------
     known_barcodes = set()
     if "df" in st.session_state and not st.session_state["df"].empty:
         try:
-            known_barcodes = set(st.session_state["df"]["Variant Barcode"].astype(str).dropna().tolist())
+            known_barcodes = set(
+                st.session_state["df"]["Variant Barcode"].astype(str).dropna().tolist()
+            )
         except Exception:
             pass
 
-    st.info("💡 Comparaison sur le **barcode**. Tu peux forcer un scan live de Shopify si besoin.")
-    use_live_scan = st.checkbox("🔎 Forcer un scan live de Shopify (ignorer la base locale)", value=False)
-    if use_live_scan:
-        with st.spinner("Récupération des barcodes Shopify..."):
-            known_barcodes = fetch_all_barcodes_from_shopify(shop_url, headers, api_version)
-        st.success(f"{len(known_barcodes)} barcodes trouvés sur Shopify.")
+    # ---------- paramètres communs ----------
+    usd_to_eur_rate = st.number_input(
+        "💱 Taux USD → EUR",
+        value=0.92, min_value=0.5, max_value=2.0, step=0.01,
+        key="usd_eur_common_tab8"
+    )
+    multiplier = st.number_input(
+        "📈 Multiplicateur PV (ex: 2.8)",
+        value=2.8, min_value=1.0, max_value=10.0, step=0.05,
+        key="mult_common_tab8"
+    )
+    rounding_mode = st.selectbox(
+        "🎯 Style d’arrondi",
+        [".90 (vers le bas)", "0,10 le + proche", ".95 (vers le bas)", "arrondi sup. à 0,05", "aucun"],
+        index=0,
+        key="round_common_tab8"
+    )
 
-    # ---------- Paramètres pricing ----------
-    default_vendor = st.text_input("🏭 Vendor par défaut (si absent dans le texte)", value="STYLE KOREAN")
-    default_product_type = st.text_input("📦 Type de produit (optionnel)", value="")
-    usd_to_eur_rate = st.number_input("💱 Taux USD → EUR", value=0.92, min_value=0.5, max_value=2.0, step=0.01)
-    multiplier = st.number_input("📈 Multiplicateur prix de vente (ex: 2.8)", value=2.8, min_value=1.0, max_value=10.0, step=0.05)
-    rounding_mode = st.selectbox("🎯 Style d’arrondi", [".90 (vers le bas)", "0,10 le + proche", ".95 (vers le bas)", "arrondi sup. à 0,05", "aucun"], index=0)
+    # ---------- utilitaire de création Shopify (commun aux 2 branches) ----------
+    def create_products(df_rows, default_product_type, headers, shop_url, api_version):
+        progress = st.progress(0.0)
+        created = 0
+        total = max(1, len(df_rows))
 
-    # ---------- Uploader CSV ----------
-    csv_new = st.file_uploader("📁 Uploader le CSV fournisseur (Product Name, Retail Price, Weight)", type=["csv"])
+        for _, row in df_rows.iterrows():
+            try:
+                title    = (row.get("Title") or "").strip() or "Sans nom"
+                vendor   = (row.get("Vendor") or "").strip()
+                barcode  = (row.get("Barcode") or "").strip()
+                size_val = (row.get("Size") or "").strip()
+                cost_eur = row.get("Cost EUR", None)
+                pv_eur   = row.get("PV conseillé EUR", None)
+                weight_g = row.get("Weight (g)", None)
 
-    if csv_new:
-        try:
-            df_sup = pd.read_csv(csv_new)
+                variant_obj = {
+                    "barcode": barcode,
+                    "price": f"{pv_eur:.2f}" if pd.notna(pv_eur) else "0.00",
+                    "inventory_management": "shopify",
+                    "inventory_policy": "deny",
+                }
+                if pd.notna(weight_g):
+                    try:
+                        variant_obj["weight"] = float(round(float(weight_g), 3))
+                        variant_obj["weight_unit"] = "g"
+                    except Exception:
+                        pass
 
-            def find_col(cands):
-                for c in df_sup.columns:
-                    if str(c).strip().lower() in [x.lower() for x in cands]:
-                        return c
-                return None
+                product_payload = {
+                    "product": {
+                        "title": title,
+                        "vendor": vendor,
+                        "status": "draft",
+                        "variants": [variant_obj],
+                    }
+                }
+                if default_product_type and default_product_type.strip():
+                    product_payload["product"]["product_type"] = default_product_type.strip()
 
-            col_name   = find_col(["Product Name", "name", "Nom", "Produit"])
-            col_retail = find_col(["Retail Price", "Retail", "Price", "Tarif"])
-            col_weight = find_col(["Weight", "Poids"])
+                # 1) créer le produit
+                resp = requests.post(
+                    f"https://{shop_url}/admin/api/{api_version}/products.json",
+                    headers=headers,
+                    json=product_payload,
+                )
+                if resp.status_code not in (200, 201):
+                    st.error(f"❌ Échec création '{title}' ({barcode}) : {resp.text}")
+                    created += 1
+                    progress.progress(created / total)
+                    continue
 
-            if not col_name:
-                st.error("❌ Colonne 'Product Name' introuvable.")
-            else:
-                # Parse Product Name
-                parsed_rows = df_sup[col_name].apply(parse_product_name).tolist()
-                df_parsed = pd.DataFrame(parsed_rows)
-                df_parsed["Barcode"] = df_parsed["Barcode"].astype(str).str.extract(r'(\d{8,14})')
-                df_parsed["Vendor"] = df_parsed["Vendor"].replace("", None).fillna(default_vendor)
+                prod = resp.json().get("product", {})
+                prod_id = prod.get("id")
+                variant = (prod.get("variants") or [{}])[0]
+                inventory_item_id = variant.get("inventory_item_id")
+                st.success(f"✅ Brouillon créé : {title} — ID {prod_id}")
 
-                # Prix d'achat USD → EUR ; PV
-                if col_retail:
-                    df_parsed["Cost USD"] = df_sup[col_retail].apply(extract_usd_from_retail)
-                else:
-                    df_parsed["Cost USD"] = None
-
-                df_parsed["Cost EUR"]       = df_parsed["Cost USD"].apply(lambda x: round(x * usd_to_eur_rate, 2) if pd.notna(x) else None)
-                df_parsed["PV brut EUR"]    = df_parsed["Cost EUR"].apply(lambda x: round(x * multiplier, 2) if pd.notna(x) else None)
-                df_parsed["PV conseillé EUR"]= df_parsed["PV brut EUR"].apply(lambda x: price_rounding(x, rounding_mode) if pd.notna(x) else None)
-
-                # 🔹 Poids (g) depuis la colonne Weight
-                if col_weight:
-                    df_parsed["Weight (g)"] = df_sup[col_weight].apply(parse_weight_to_grams)
-                else:
-                    df_parsed["Weight (g)"] = None
-
-                # Nouveaux produits (barcodes non connus)
-                df_new = df_parsed[df_parsed["Barcode"].notna() & ~df_parsed["Barcode"].isin(known_barcodes)].copy()
-
-                st.markdown(f"### 📌 Nouveaux produits détectés : **{len(df_new)}**")
-                if df_new.empty:
-                    st.success("Aucun nouveau produit à créer ✅")
-                else:
-                    df_new["__label__"] = df_new.apply(
-                        lambda r: f"{r['Vendor']} — {r['Title']} — {r['Size']} — {r['Barcode']}",
-                        axis=1
+                # 2) metafield taille
+                if size_val:
+                    metafield_payload = {
+                        "metafield": {
+                            "namespace": "custom",
+                            "key": "taille",
+                            "type": "single_line_text_field",
+                            "value": size_val,
+                        }
+                    }
+                    _ = requests.post(
+                        f"https://{shop_url}/admin/api/{api_version}/products/{prod_id}/metafields.json",
+                        headers=headers,
+                        json=metafield_payload,
                     )
-                    cols_show = ["Vendor","Title","Size","Barcode","Weight (g)","Cost USD","Cost EUR","PV conseillé EUR"]
-                    st.dataframe(df_new[cols_show], use_container_width=True)
 
-                    to_create = st.multiselect(
+                # 3) coût (EUR)
+                if pd.notna(cost_eur) and inventory_item_id:
+                    inv_payload = {"inventory_item": {"id": inventory_item_id, "cost": float(round(cost_eur, 2))}}
+                    _ = requests.put(
+                        f"https://{shop_url}/admin/api/{api_version}/inventory_items/{inventory_item_id}.json",
+                        headers=headers,
+                        json=inv_payload,
+                    )
+
+            except Exception as e:
+                st.error(f"❌ Erreur inattendue : {e}")
+
+            created += 1
+            time.sleep(0.4)  # anti-quota
+            progress.progress(created / total)
+
+        st.success(f"🎉 Créations terminées : {created}/{total}.")
+
+    # ---------- Sélecteur de source ----------
+    source_new = st.selectbox(
+        "📦 Source à créer",
+        ["StyleKorean (CSV)", "QUDO (TXT)"],
+        key="src_new_tab8"
+    )
+
+    # ============= BRANCHE CSV (StyleKorean) ==================
+    if source_new == "StyleKorean (CSV)":
+        default_vendor_csv = st.text_input(
+            "🏭 Vendor par défaut (si absent dans le texte)",
+            value="STYLE KOREAN",
+            key="vendor_csv_tab8"
+        )
+        default_product_type_csv = st.text_input(
+            "📦 Type de produit (optionnel)",
+            value="",
+            key="type_csv_tab8"
+        )
+
+        csv_new = st.file_uploader(
+            "📁 CSV fournisseur (Product Name, Retail Price, Weight)",
+            type=["csv"],
+            key="new_csv_tab8"
+        )
+
+        if csv_new:
+            try:
+                df_sup = pd.read_csv(csv_new)
+
+                # helpers locaux (CSV)
+                def find_col(cands):
+                    for c in df_sup.columns:
+                        if str(c).strip().lower() in [x.lower() for x in cands]:
+                            return c
+                    return None
+
+                col_name   = find_col(["Product Name", "name", "Nom", "Produit"])
+                col_retail = find_col(["Retail Price", "Retail", "Price", "Tarif"])
+                col_weight = find_col(["Weight", "Poids"])
+
+                if not col_name:
+                    st.error("❌ Colonne 'Product Name' introuvable.")
+                else:
+                    # — parse Product Name (ta fonction existe déjà plus haut)
+                    parsed_rows = df_sup[col_name].apply(parse_product_name).tolist()
+                    df_parsed = pd.DataFrame(parsed_rows)
+                    df_parsed["Barcode"] = df_parsed["Barcode"].astype(str).str.extract(r'(\d{8,14})')
+                    df_parsed["Vendor"] = df_parsed["Vendor"].replace("", None).fillna(default_vendor_csv)
+
+                    # retail → cost USD
+                    def extract_usd_from_retail(retail_raw: str):
+                        if pd.isna(retail_raw):
+                            return None
+                        s = str(retail_raw)
+                        lines = [x.strip() for x in re.split(r'[\r\n]+', s) if x.strip()]
+                        nums = []
+                        for ln in lines:
+                            m = re.search(r'(\d[\d,]*\.?\d*)', ln)
+                            if m:
+                                try:
+                                    nums.append(float(m.group(1).replace(",", "")))
+                                except Exception:
+                                    pass
+                        if len(nums) >= 2:
+                            return nums[1]
+                        return nums[0] if nums else None
+
+                    if col_retail:
+                        df_parsed["Cost USD"] = df_sup[col_retail].apply(extract_usd_from_retail)
+                    else:
+                        df_parsed["Cost USD"] = None
+
+                    # conversions + PV conseillés (ta fonction price_rounding existe déjà au-dessus)
+                    df_parsed["Cost EUR"]         = df_parsed["Cost USD"].apply(lambda x: round(x * usd_to_eur_rate, 2) if pd.notna(x) else None)
+                    df_parsed["PV brut EUR"]      = df_parsed["Cost EUR"].apply(lambda x: round(x * multiplier, 2) if pd.notna(x) else None)
+                    df_parsed["PV conseillé EUR"] = df_parsed["PV brut EUR"].apply(lambda x: price_rounding(x, rounding_mode) if pd.notna(x) else None)
+
+                    # poids (g)
+                    if col_weight:
+                        df_parsed["Weight (g)"] = df_sup[col_weight].apply(parse_weight_to_grams)
+                    else:
+                        df_parsed["Weight (g)"] = None
+
+                    # nouveaux produits
+                    df_new = df_parsed[df_parsed["Barcode"].notna() & ~df_parsed["Barcode"].isin(known_barcodes)].copy()
+                    st.dataframe(
+                        df_new[["Vendor","Title","Size","Barcode","Weight (g)","Cost USD","Cost EUR","PV conseillé EUR"]],
+                        use_container_width=True
+                    )
+
+                    labels_csv = (
+                        df_new["Vendor"].astype(str) + " — " +
+                        df_new["Title"].astype(str) + " — " +
+                        df_new["Size"].astype(str) + " — " +
+                        df_new["Barcode"].astype(str)
+                    ).tolist()
+                    to_create_csv = st.multiselect(
                         "Sélectionne les produits à créer",
-                        options=df_new["__label__"].tolist(),
-                        default=df_new["__label__"].tolist()
+                        options=labels_csv,
+                        key="sel_csv_tab8"
                     )
 
-                    if st.button("🧪 Créer en brouillon sur Shopify"):
-                        sel = df_new[df_new["__label__"].isin(to_create)]
+                    if st.button("🧪 Créer en brouillon (CSV)", key="btn_create_csv_tab8"):
+                        sel = df_new[
+                            (df_new["Vendor"].astype(str) + " — " +
+                             df_new["Title"].astype(str) + " — " +
+                             df_new["Size"].astype(str) + " — " +
+                             df_new["Barcode"].astype(str)).isin(to_create_csv)
+                        ]
                         if sel.empty:
                             st.warning("Aucune sélection.")
                         else:
-                            progress = st.progress(0)
-                            created = 0
-                            for i, row in sel.iterrows():
-                                title   = (row["Title"] or "").strip() or "Sans nom"
-                                vendor  = (row["Vendor"] or "").strip() or default_vendor
-                                barcode = (row["Barcode"] or "").strip()
-                                size_val= (row["Size"] or "").strip()
-                                cost_eur= row.get("Cost EUR", None)
-                                pv_eur  = row.get("PV conseillé EUR", None)
-                                weight_g= row.get("Weight (g)", None)
+                            create_products(sel, default_product_type_csv, headers, shop_url, api_version)
 
-                                variant_obj = {
-                                    "barcode": barcode,
-                                    "price": f"{pv_eur:.2f}" if pd.notna(pv_eur) else "0.00",
-                                    "inventory_management": "shopify",
-                                    "inventory_policy": "deny"
-                                }
-                                # ➕ poids (en grammes)
-                                if pd.notna(weight_g):
-                                    try:
-                                        variant_obj["weight"] = float(round(weight_g, 3))
-                                        variant_obj["weight_unit"] = "g"
-                                    except:
-                                        pass
+            except Exception as e:
+                st.error(f"Erreur lecture/traitement CSV : {e}")
 
-                                product_payload = {
-                                    "product": {
-                                        "title": title,
-                                        "vendor": vendor,
-                                        "status": "draft",
-                                        "variants": [variant_obj]
-                                    }
-                                }
-                                if default_product_type.strip():
-                                    product_payload["product"]["product_type"] = default_product_type.strip()
+    # ============= BRANCHE TXT (QUDO) ==================
+    else:
+        # NOTE: parse_qudo_text_to_df & parse_qudo_name doivent être définies plus haut (helpers)
+        default_vendor_txt = st.text_input(
+            "🏭 Vendor par défaut (si absent dans le nom)",
+            value="",
+            key="vendor_txt_tab8"
+        )
+        default_product_type_txt = st.text_input(
+            "📦 Type de produit (optionnel)",
+            value="",
+            key="type_txt_tab8"
+        )
+        default_weight_g = st.number_input(
+            "⚖️ Poids (g) par défaut",
+            value=0.0, min_value=0.0, step=1.0,
+            key="weight_txt_tab8"
+        )
 
-                                try:
-                                    # 1) Créer le produit (draft)
-                                    resp = requests.post(
-                                        f"https://{shop_url}/admin/api/{api_version}/products.json",
-                                        headers=headers,
-                                        json=product_payload
-                                    )
-                                    if resp.status_code not in (200, 201):
-                                        st.error(f"❌ Échec création '{title}' ({barcode}) : {resp.text}")
-                                        progress.progress((created + 1) / max(1, len(sel)))
-                                        continue
+        txt_new = st.file_uploader(
+            "📄 Fichier texte QUDO",
+            type=["txt"],
+            key="new_txt_tab8"
+        )
 
-                                    prod = resp.json().get("product", {})
-                                    prod_id = prod.get("id")
-                                    variant = (prod.get("variants") or [{}])[0]
-                                    inventory_item_id = variant.get("inventory_item_id")
-                                    st.success(f"✅ Brouillon créé : {title} — ID {prod_id}")
+        if txt_new:
+            try:
+                # 1) Parse TXT QUDO -> DataFrame (contient déjà "Unit Price EUR")
+                content = txt_new.read().decode("utf-8", errors="ignore")
+                df_txt = parse_qudo_text_to_df(content, include_samples=False)
 
-                                    # 2) Metafield custom.taille
-                                    if size_val:
-                                        metafield_payload = {
-                                            "metafield": {
-                                                "namespace": "custom",
-                                                "key": "taille",
-                                                "type": "single_line_text_field",
-                                                "value": size_val
-                                            }
-                                        }
-                                        mresp = requests.post(
-                                            f"https://{shop_url}/admin/api/{api_version}/products/{prod_id}/metafields.json",
-                                            headers=headers,
-                                            json=metafield_payload
-                                        )
-                                        if mresp.status_code in (200, 201):
-                                            st.info(f"🧩 Metafield 'custom.taille' ajoutée : {size_val}")
-                                        else:
-                                            st.warning(f"⚠️ Metafield non ajoutée : {mresp.text}")
+                # 2) Découpe Vendor / Title / Size à partir du Product Name
+                parsed = df_txt["Product Name"].apply(lambda x: parse_qudo_name(x, default_vendor_txt)).apply(pd.Series)
+                df_parsed = pd.concat([parsed, df_txt[["Barcode","Unit Price EUR"]]], axis=1)
+                df_parsed["Barcode"] = df_parsed["Barcode"].astype(str).str.extract(r'(\d{8,14})')
+                df_parsed = df_parsed[df_parsed["Barcode"].notna()]
 
-                                    # 3) Enregistrer le coût (EUR) sur l'inventory_item
-                                    if pd.notna(cost_eur) and inventory_item_id:
-                                        inv_payload = {"inventory_item": {"id": inventory_item_id, "cost": float(round(cost_eur, 2))}}
-                                        inv_resp = requests.put(
-                                            f"https://{shop_url}/admin/api/{api_version}/inventory_items/{inventory_item_id}.json",
-                                            headers=headers,
-                                            json=inv_payload
-                                        )
-                                        if inv_resp.status_code in (200, 201):
-                                            st.info(f"💰 Coût enregistré (EUR) : {cost_eur:.2f}")
-                                        else:
-                                            st.warning(f"⚠️ Coût non enregistré : {inv_resp.text}")
+                # 3) Coût = prix QUDO (déjà en EUR) ; poids par défaut
+                df_parsed["Cost EUR"]   = df_parsed["Unit Price EUR"].astype(float)
+                df_parsed["Weight (g)"] = default_weight_g
 
-                                    created += 1
-                                    time.sleep(0.4)  # anti-quota souple
-                                    progress.progress(created / max(1, len(sel)))
+                # 4) Calcul PV conseillé (à partir de Cost EUR) avec tes paramètres globaux multiplier/rounding_mode
+                df_parsed["PV brut EUR"]      = df_parsed["Cost EUR"].apply(lambda x: round(x * multiplier, 2) if pd.notna(x) else None)
+                df_parsed["PV conseillé EUR"] = df_parsed["PV brut EUR"].apply(lambda x: price_rounding(x, rounding_mode) if pd.notna(x) else None)
 
-                                except Exception as e:
-                                    st.error(f"❌ Erreur inattendue '{title}' : {e}")
+                # 5) Retirer ce qui existe déjà dans Shopify (barcodes connus)
+                df_new = df_parsed[~df_parsed["Barcode"].isin(known_barcodes)].copy()
 
-                            st.success(f"🎉 Créations terminées : {created}/{len(sel)} produit(s) en brouillon.")
-        except Exception as e:
-            st.error(f"Erreur lecture/traitement CSV : {e}")
+                st.dataframe(
+                    df_new[["Vendor","Title","Size","Barcode","Weight (g)","Cost EUR","PV conseillé EUR"]],
+                    use_container_width=True
+                )
+
+                # 6) Sélection des produits à créer
+                labels_txt = (
+                    df_new["Vendor"].astype(str) + " — " +
+                    df_new["Title"].astype(str) + " — " +
+                    df_new["Size"].astype(str) + " — " +
+                    df_new["Barcode"].astype(str)
+                ).tolist()
+                to_create_txt = st.multiselect(
+                    "Sélectionne les produits à créer",
+                    options=labels_txt,
+                    key="sel_txt_tab8"
+                )
+
+                # 7) Création en brouillon sur Shopify
+                if st.button("🧪 Créer en brouillon (TXT QUDO)", key="btn_create_txt_tab8"):
+                    sel = df_new[
+                        (df_new["Vendor"].astype(str) + " — " +
+                         df_new["Title"].astype(str) + " — " +
+                         df_new["Size"].astype(str) + " — " +
+                         df_new["Barcode"].astype(str)).isin(to_create_txt)
+                    ]
+                    if sel.empty:
+                        st.warning("Aucune sélection.")
+                    else:
+                        create_products(sel, default_product_type_txt, headers, shop_url, api_version)
+
+            except Exception as e:
+                st.error(f"Erreur lecture/traitement TXT : {e}")
+
